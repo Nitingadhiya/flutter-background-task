@@ -1,16 +1,7 @@
-import 'dart:async';
-import 'dart:io';
-import 'dart:ui';
-
-import 'package:device_info_plus/device_info_plus.dart';
-import 'package:dio/dio.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-
-
+import 'package:background_location/background_location.dart';
 
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
 FlutterLocalNotificationsPlugin();
@@ -30,7 +21,6 @@ Future<void> requestPermission() async {
     print('Permission denied');
   }
 }
-
 Future<void> showNotification() async {
   const DarwinNotificationDetails iOSDetails = DarwinNotificationDetails(
     presentAlert: true,
@@ -59,216 +49,140 @@ Future<void> main() async {
 
   const InitializationSettings initializationSettings = InitializationSettings(
     iOS: initializationSettingsIOS,
-    android: null,
+    android: null, // Omit Android settings for iOS-specific implementation
   );
 
   await flutterLocalNotificationsPlugin.initialize(
     initializationSettings,
     onDidReceiveNotificationResponse: (NotificationResponse response) {
+      // Handle notification tap
       print('Notification tapped!');
     },
   );
-  await initializeService();
-  runApp(const MyApp());
-}
-
-Future<void> initializeService() async {
-  final service = FlutterBackgroundService();
-
-  /// OPTIONAL, using custom notification channel id
-  const AndroidNotificationChannel channel = AndroidNotificationChannel(
-    'my_foreground', // id
-    'MY FOREGROUND SERVICE', // title
-    description: 'This channel is used for important notifications.', // description
-    importance: Importance.low,
-  );
-
-  final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
-
-  if (Platform.isIOS || Platform.isAndroid) {
-    await flutterLocalNotificationsPlugin.initialize(
-      const InitializationSettings(
-        iOS: DarwinInitializationSettings(),
-        android: AndroidInitializationSettings('ic_bg_service_small'),
-      ),
-    );
-  }
-
-  await flutterLocalNotificationsPlugin
-      .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
-      ?.createNotificationChannel(channel);
-
-  await service.configure(
-    androidConfiguration: AndroidConfiguration(
-      onStart: onStart,
-      autoStart: true,
-      isForegroundMode: true,
-
-      notificationChannelId: 'my_foreground',
-      initialNotificationTitle: 'AWESOME SERVICE',
-      initialNotificationContent: 'Initializing',
-      foregroundServiceNotificationId: 888,
-      foregroundServiceTypes: [AndroidForegroundType.location],
-    ),
-    iosConfiguration: IosConfiguration(
-      autoStart: true,
-      onForeground: onStart,
-      onBackground: onIosBackground,
-    ),
-  );
-}
-
-@pragma('vm:entry-point')
-Future<bool> onIosBackground(ServiceInstance service) async {
-  WidgetsFlutterBinding.ensureInitialized();
-  DartPluginRegistrant.ensureInitialized();
-
-  SharedPreferences preferences = await SharedPreferences.getInstance();
-  await preferences.reload();
-  final log = preferences.getStringList('log') ?? <String>[];
-  log.add(DateTime.now().toIso8601String());
-  await preferences.setStringList('log', log);
-
-  return true;
-}
-
-@pragma('vm:entry-point')
-void onStart(ServiceInstance service) async {
-  DartPluginRegistrant.ensureInitialized();
-  SharedPreferences preferences = await SharedPreferences.getInstance();
-  await preferences.setString("hello", "world");
-
-  /// OPTIONAL when use custom notification
-
-  if (service is AndroidServiceInstance) {
-    service.on('setAsForeground').listen((event) {
-      service.setAsForegroundService();
-    });
-
-    service.on('setAsBackground').listen((event) {
-      service.setAsBackgroundService();
-    });
-  }
-
-  service.on('stopService').listen((event) {
-    service.stopSelf();
-  });
-
-  Timer.periodic(const Duration(seconds: 20), (timer) async {
-    requestPermission();
-    showNotification();
-    fetchBitcoinPrice();
-    final deviceInfo = DeviceInfoPlugin();
-    String? device;
-    if (Platform.isAndroid) {
-      final androidInfo = await deviceInfo.androidInfo;
-      device = androidInfo.model;
-    } else if (Platform.isIOS) {
-      final iosInfo = await deviceInfo.iosInfo;
-      device = iosInfo.model;
-    }
-
-    service.invoke(
-      'update',
-      {
-        "current_date": DateTime.now().toIso8601String(),
-        "device": device,
-      },
-    );
-  });
-}
-
-fetchBitcoinPrice() async {
-  try {
-    Dio dio = Dio();
-    Response response = await dio.get(
-      'https://api.coindesk.com/v1/bpi/currentprice.json',
-    );
-
-    if (response.statusCode == 200) {
-      print("------response------${response.data}");
-    }
-  } catch (e) {
-    print("--------error------$e");
-  }
+  runApp(MyApp());
 }
 
 class MyApp extends StatefulWidget {
-  const MyApp({Key? key}) : super(key: key);
-
   @override
-  State<MyApp> createState() => _MyAppState();
+  _MyAppState createState() => _MyAppState();
 }
 
 class _MyAppState extends State<MyApp> {
-  SharedPreferences? preferences;
+  String latitude = 'waiting...';
+  String longitude = 'waiting...';
+  String altitude = 'waiting...';
+  String accuracy = 'waiting...';
+  String bearing = 'waiting...';
+  String speed = 'waiting...';
+  String time = 'waiting...';
+  bool? serviceRunning = null;
 
   @override
   void initState() {
     super.initState();
-    share();
   }
 
-  share() async {
-    preferences = await SharedPreferences.getInstance();
-    setState(() {});
-  }
-
-  String text = "Stop Service";
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       home: Scaffold(
         appBar: AppBar(
-          title: const Text('Service App'),
+          title: const Text('Background Location Service'),
         ),
-        body: SingleChildScrollView(
-          child: Column(
-            children: [
-              StreamBuilder<Map<String, dynamic>?>(
-                stream: FlutterBackgroundService().on('update'),
-                builder: (context, snapshot) {
-                  if (!snapshot.hasData) {
-                    return const Center(
-                      child: CircularProgressIndicator(),
+        body: Center(
+          child: ListView(
+            children: <Widget>[
+              locationData('Latitude: ' + latitude),
+              locationData('Longitude: ' + longitude),
+              locationData('Altitude: ' + altitude),
+              locationData('Accuracy: ' + accuracy),
+              locationData('Bearing: ' + bearing),
+              locationData('Speed: ' + speed),
+              locationData('Time: ' + time),
+              locationData('IsServiceRunning: ' + serviceRunning.toString()),
+              ElevatedButton(
+                  onPressed: () async {
+                    await BackgroundLocation.setAndroidNotification(
+                      title: 'Background service is running',
+                      message: 'Background location in progress',
+                      icon: '@mipmap/ic_launcher',
                     );
-                  }
-          
-                  final data = snapshot.data!;
-                  String? device = data["device"];
-                  DateTime? date = DateTime.tryParse(data["current_date"]);
-                  return Column(
-                    children: [
-                      Text(device ?? 'Unknown'),
-                      Text(date.toString()),
-                    ],
-                  );
-                },
-              ),
+                    //await BackgroundLocation.setAndroidConfiguration(1000);
+                    await BackgroundLocation.startLocationService();
+                    BackgroundLocation.getLocationUpdates((location) {
+                      setState(() {
+                        latitude = location.latitude.toString();
+                        longitude = location.longitude.toString();
+                        accuracy = location.accuracy.toString();
+                        altitude = location.altitude.toString();
+                        bearing = location.bearing.toString();
+                        speed = location.speed.toString();
+                        time = DateTime.fromMillisecondsSinceEpoch(
+                            location.time!.toInt())
+                            .toString();
+                      });
+                      requestPermission();
+                      showNotification();
+                      print('''\n
+                        Latitude:  $latitude
+                        Longitude: $longitude
+                        Altitude: $altitude
+                        Accuracy: $accuracy
+                        Bearing:  $bearing
+                        Speed: $speed
+                        Time: $time
+                        IsServiceRunning: $serviceRunning
+                      ''');
+                    });
+                  },
+                  child: Text('Start Location Service')),
               ElevatedButton(
-                child: const Text("Foreground Mode"),
-                onPressed: () => FlutterBackgroundService().invoke("setAsForeground"),
-              ),
+                  onPressed: () {
+                    BackgroundLocation.stopLocationService();
+                  },
+                  child: Text('Stop Location Service')),
               ElevatedButton(
-                child: const Text("Background Mode"),
-                onPressed: () => FlutterBackgroundService().invoke("setAsBackground"),
-              ),
+                  onPressed: () {
+                    BackgroundLocation.isServiceRunning().then((value) {
+                      setState(() {
+                        serviceRunning = value;
+                      });
+                      print("Is Running: $value");
+                    });
+                  },
+                  child: Text('Check service')),
               ElevatedButton(
-                child: Text(text),
-                onPressed: () async {
-                  final service = FlutterBackgroundService();
-                  var isRunning = await service.isRunning();
-                  isRunning ? service.invoke("stopService") : service.startService();
-          
-                  setState(() {
-                    text = isRunning ? 'Start Service' : 'Stop Service';
-                  });
-                },
-              ),
+                  onPressed: () {
+                    getCurrentLocation();
+                  },
+                  child: Text('Get Current Location')),
             ],
           ),
         ),
       ),
     );
+  }
+
+  Widget locationData(String data) {
+    return Text(
+      data,
+      style: TextStyle(
+        fontWeight: FontWeight.bold,
+        fontSize: 18,
+      ),
+      textAlign: TextAlign.center,
+    );
+  }
+
+  void getCurrentLocation() {
+    BackgroundLocation().getCurrentLocation().then((location) {
+      print('This is current Location ' + location.toMap().toString());
+    });
+  }
+
+  @override
+  void dispose() {
+    BackgroundLocation.stopLocationService();
+    super.dispose();
   }
 }
